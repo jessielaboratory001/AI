@@ -1,0 +1,467 @@
+from flask import Flask, request, abort, jsonify #引用Web Server套件
+
+import json, urllib.request, os, requests, prettytable
+from bs4 import BeautifulSoup
+
+from linebot import (LineBotApi, WebhookHandler)
+
+from linebot.exceptions import (InvalidSignatureError) # 引用無效簽章錯誤
+
+from linebot.models import (
+    MessageAction, URIAction, PostbackAction, DatetimePickerAction,
+    CameraAction, CameraRollAction, LocationAction, QuickReply, QuickReplyButton
+)
+
+from linebot.models import (
+    TextMessage, ImageMessage, AudioMessage, VideoMessage, RichMenu
+)
+
+from linebot.models import (
+    TextSendMessage, ImageSendMessage, TemplateSendMessage
+)
+
+from linebot.models.template import ButtonsTemplate
+
+from linebot.models.events import (
+    FollowEvent, MessageEvent, PostbackEvent,
+)
+
+import logging
+import google.cloud.logging
+from google.cloud.logging.handlers import CloudLoggingHandler
+
+client = google.cloud.logging.Client()
+
+# 建立line event log，用來記錄line event
+bot_event_handler = CloudLoggingHandler(client,name="line_bot_event")
+bot_event_logger=logging.getLogger('line_bot_event')
+bot_event_logger.setLevel(logging.INFO)
+bot_event_logger.addHandler(bot_event_handler)
+
+app = Flask(__name__)
+access_token = "YOUR CHANNEL ACCESS TOKEN"
+line_bot_api = LineBotApi(access_token)
+handler = WebhookHandler("YOUR CHANNEL SECRET")
+
+# 啟動server對外接口，使Line能丟消息進來
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']     #get X-Line-Signature header value
+    body = request.get_data(as_text=True)  #get request body as text
+    #app.logger.info("Request body: " + body)
+    #print(body)
+    bot_event_logger.info(body)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        print("Invalid signature. Please check your channel access token/channel secret.")
+        abort(400)
+
+    return 'OK'
+
+# 創建QuickReplyButton
+## 點擊後，以用戶身份發送文字消息--MessageAction
+textQuickReplyButton = QuickReplyButton(action=MessageAction(label="發送文字消息", text="text2"))
+
+## 點擊後，彈跳出選擇時間之視窗--DatetimePickerAction
+dateQuickReplyButton = QuickReplyButton(
+    action=DatetimePickerAction(label="時間選擇", data="data3", mode="date"))
+
+## 點擊後，開啟相機--CameraAction
+cameraQuickReplyButton = QuickReplyButton(action=CameraAction(label="拍照"))
+
+## 點擊後，切換至照片相簿選擇
+cameraRollQRB = QuickReplyButton(action=CameraRollAction(label="選擇照片"))
+
+## 點擊後，跳出地理位置
+locationQRB = QuickReplyButton(action=LocationAction(label="地理位置"))
+
+## 點擊後，以Postback事件回應Server 
+postbackQRB = QuickReplyButton(action=PostbackAction(label="我是PostbackEvent", data="data1"))
+
+##以QuickReply封裝該些QuickReply Button
+quickReplyList = QuickReply(
+    items = [textQuickReplyButton, dateQuickReplyButton, cameraQuickReplyButton, cameraRollQRB, locationQRB,postbackQRB]
+)
+
+#製作TextSendMessage，並將剛封裝的QuickReply放入
+quick_reply_text_send_message = TextSendMessage(text='發送問題給用戶，請用戶回答', quick_reply=quickReplyList)
+
+'''
+alt_text: Line簡覽視窗所出現的說明文字
+template: 所使用的模板
+ButtonsTemplate: 按鍵模板
+    thumbnail_image_url: 展示圖片
+    title: 標題
+    text: 說明文字
+    actions: 模板行為所使用的行為
+    data: 觸發postback後用戶回傳值，可以對其做商業邏輯處理，隱藏資料的欄位
+'''
+buttons_template_message = TemplateSendMessage(
+    alt_text='Buttons template',
+    template=ButtonsTemplate(
+        thumbnail_image_url='https://storage.googleapis.com/gcp-ai-2023-jessie-linebotai/pic/items.jpg',
+        title='發現好物',
+        text='請點擊下方獲得更多資訊',
+        actions=[
+          {
+            "type": "postback",
+            "label": "【瑞穗低脂鮮乳】1857ml",
+            "text": "到期日：2023/03/28\n贈品：3盒小紙盒裝鮮乳\n售價：177元\n發現日：2023/03/20\n地點：板橋區三民路家樂福",
+            "data": "item1"
+          },
+          {
+            "type": "postback",
+            "label": "【淳淳御豆有機豆干】300g",
+            "text": "到期日：2023/03/25\n原價：75元\n售價：53元\n發現日：2023/03/20\n地點：板橋區三民路家樂福",
+            "data": "item2"
+          }
+        ],
+    )
+)
+
+#設計一個字典，當用戶輸入相應文字消息時，系統會從此挑揀消息
+
+template_message_dict = {
+  "@玩看看":TextSendMessage("好喔~提示你：有很多種子的綠色水果。請輸入答案：@答案　或輸入：@1"),  
+  "@1":TextSendMessage("在提示你：果肉白而甜！請輸入答案：@答案　或輸入：@2"),
+  "@2":TextSendMessage("多提示你一點：果實表面有鱗目、鱗溝。請輸入答案：@答案　或輸入：@3"),
+  "@3":TextSendMessage("最後提示你喔~果實像XXXXX的頭。請輸入答案：@答案"),  
+  "@reply":quick_reply_text_send_message,
+  "@more":buttons_template_message,
+  "@111":ImageSendMessage(
+      original_content_url='https://i.imgur.com/M8jnn9B.png',
+      preview_image_url='https://i.imgur.com/M8jnn9B.png'
+      )
+}
+
+#告知handler，如果收到用戶關注FollowEvent(加好友、封鎖、解封鎖)，則做下面的方法處理
+from google.cloud import storage
+from google.cloud import firestore
+@handler.add(FollowEvent)
+def reply_text_and_get_user_profile(event):
+  global SELF_USER_ID1
+  # 取出消息內User的資料
+  SELF_USER_ID1 = event.source.user_id
+  # 取個資
+  line_user_profile = line_bot_api.get_profile(event.source.user_id)
+
+  # 跟line 取回用戶大頭照片，並放置在本地端
+  file_name = line_user_profile.user_id + '.jpg'
+  urllib.request.urlretrieve(line_user_profile.picture_url, file_name)
+
+  # 設定雲端資料
+  storage_client = storage.Client()
+  bucket_name = "gcp-ai-cs-tw0001"
+
+  # 依照用戶id當資料夾名稱，大頭照名稱為user_pic.png
+  destination_blob_name = f"{line_user_profile.user_id}/user_pic.png"
+  source_file_name = file_name
+
+  # 上傳至cloud storage
+  bucket = storage_client.bucket(bucket_name)
+  blob = bucket.blob(destination_blob_name)
+  blob.upload_from_filename(source_file_name)
+
+  # 設定用戶資料json
+  user_dict = {
+      "user_id": line_user_profile.user_id,
+      "picture_url": f"https://storage.googleapis.com/{bucket_name}/destination_blob_name",
+      "display_name": line_user_profile.display_name,
+      "status_message": line_user_profile.status_message
+  }
+  # 將用戶資料新增至firestore，table name為line-user，主鍵為user_id
+  db = firestore.Client()
+  doc_ref = db.collection(u'line-user').document(user_dict.get("user_id"))
+  doc_ref.set(user_dict)
+
+  #line_bot_api.reply_message(event.reply_token, TextSendMessage(text="個資已取"))
+  
+  # 回覆文字消息與圖片消息
+  line_bot_api.reply_message(
+      event.reply_token,
+      [TextSendMessage('$歡迎來挑戰，猜一樣水果~~請先輸入 @玩看看 ',emojis=[{"index":0,"productId":"5ac1bfd5040ab15980c9b435","emojiId":"105"}])] ) 
+      
+
+#圖文選單的當令蔬果
+from datetime import datetime
+currmonth=datetime.now().month
+str1="{:0>2d}月盛產\n".format(currmonth)
+if currmonth == 1:
+    str1+="《盛產蔬菜》\n 葉菜類：高麗菜、包心白菜、結球萵苣(生菜)、皺葉萵苣、菠菜、芥菜、小白菜、蕹菜、青江菜、油菜、小芥菜、山蘇、龍鬚菜、過貓、芥藍、茼蒿、芹菜、青蔥、韭菜\n 根莖類：馬鈴薯、芋、甜菜根、薑黃、洋蔥、白蘿蔔、胡蘿蔔、大頭菜、地瓜\n 花果類：白花椰菜、青花椰菜、甜瓜、胡瓜、扁蒲、豌豆、甜椒、辣椒、梨瓜(佛手瓜)、菜豆、南瓜\n 其他：冬筍\n 《盛產水果》\n 番茄、芭樂、香蕉、桶柑、椪柑、柳橙、葡萄、梨子、釋迦、蓮霧、棗"
+elif currmonth == 2:
+    str1+="《盛產蔬菜》\n 葉菜類：高麗菜、包心白菜、結球萵苣(生菜)、皺葉萵苣、菠菜、芥菜、小白菜、蕹菜、青江菜、油菜、小芥菜、山蘇、龍鬚菜、過貓、芥藍、茼蒿、芹菜 青蔥、韭菜、蒜苗、福山萵苣(大陸妹)\n 根莖類：蒜頭、洋蔥、白蘿蔔、胡蘿蔔、馬鈴薯、芋、大頭菜、甘藷\n 花果類：白花椰菜、青花菜、甜瓜、胡瓜、扁蒲、豌豆、毛豆、甜椒、辣椒、梨瓜(佛手瓜)、菜豆、南瓜\n 其他：猴頭菇\n 《盛產水果》\n 茂谷柑、桶柑、柳橙、草莓、芭樂、香蕉、釋迦、蓮霧、棗、番茄"
+elif currmonth == 3:
+    str1+="《盛產蔬菜》\n    ◆葉菜類：高麗菜、包心白菜、結球萵苣(生菜)、皺葉萵苣、菠菜、地瓜葉、小白菜、蕹菜、青江菜、油菜、小芥菜、山蘇、龍鬚菜、過貓、芥藍、茼蒿、芹菜、青蔥、韭菜、茭白筍\n    ◆根莖類：蒜頭、洋蔥、白蘿蔔、胡蘿蔔、馬鈴薯、牛蒡、地瓜\n    ◆花果類：櫛瓜、茄子、花椰菜、青花菜、胡瓜、苦瓜、絲瓜、梨瓜(佛手瓜)、扁蒲、茄子、長豇豆(菜豆仔)、豌豆、毛豆、甜椒、辣椒、南瓜\n   ◆其他：美白菇\n《盛產水果》\n芭樂、香蕉、桶柑、鳳梨、桃子、李子、釋迦、蓮霧、牛番茄、楊桃、枇杷、桑椹、西瓜、甜瓜、番茄"
+elif currmonth == 4:
+    str1+="《盛產蔬菜》\n    ◆葉菜類：高麗菜、包心白菜、地瓜葉、山蘇、小白菜、蕹菜、青江菜、油菜、小芥菜、皺葉萵苣、龍鬚菜、過貓、芥藍、莧菜、芹菜、青蔥、韭菜、茭白筍\n    ◆根莖類：大蒜、洋蔥、白蘿蔔、胡蘿蔔、馬鈴薯、芋、甘藷\n    ◆花果類：白花椰菜、青花椰菜、胡瓜、苦瓜、絲瓜、南瓜、扁蒲、茄子、長豇豆(菜豆仔)、豌豆、毛豆、四季豆、扁豆、甜椒、辣椒、金針、梨瓜(佛手瓜)\n    ◆其他：秀珍菇、箭竹筍、蘆筍、桂竹筍\n《盛產水果》\n  芭樂、香蕉、桶柑、鳳梨、桃子、李子、葡萄、釋迦、蓮霧、西瓜、甜瓜、番茄"    
+elif currmonth == 5:
+    str1+="《盛產蔬菜》\n    ◆葉菜類：高麗菜、地瓜葉、小白菜、空心菜、青江菜、油菜、小芥菜、山蘇、皺葉萵苣、龍鬚菜、過貓、芥藍、莧菜、芹菜、紫蘇、刺蔥、青蔥、韭菜、茭白筍\n   ◆根莖類：洋蔥、胡蘿蔔、馬鈴薯、芋、地瓜 \n   ◆花果類：小黃瓜、秋葵、絲瓜、豇豆(菜豆仔)\n   ◆其他：黑木耳、綠竹筍、桂竹筍、箭竹筍、蘆筍\n《盛產水果》\n   芭樂、香蕉、鳳梨、桃子、李子、葡萄、木瓜、梨子、蓮霧"
+elif currmonth == 6:
+    str1+="《盛產蔬菜》\n 葉菜類：九層塔\n 根莖類：\n 花果類：栗子南瓜、小米、白玉苦瓜、蓮子、百合\n 其他：麻竹筍\n 《盛產水果》\n 西瓜、木瓜、芭樂、香蕉、鳳梨、桃子、李子、葡萄、梨子、芒果、荔枝、紅龍果"
+elif currmonth == 7:
+    str1+="《盛產蔬菜》\n 葉菜類：紅莧菜\n 根莖類：\n 花果類：扁蒲、冬瓜、辣椒\n 其他：草菇、珊瑚菇、銀耳、水蓮\n 《盛產水果》\n 芒果、香瓜、木瓜、香蕉、檸檬、龍眼、荔枝、百香果、芭樂、鳳梨、桃子、李子、葡萄、梨子、紅龍果、釋迦"
+elif currmonth == 8:
+    str1+="《盛產蔬菜》\n 葉菜類：香茅、碧玉筍\n 根莖類：\n 花果類：山苦瓜、金針花、鷹嘴豆、韭菜花\n 《盛產水果》\n 葡萄、水梨、芭樂、香蕉、鳳梨、桃子、木瓜、芒果、紅龍果、釋迦、文旦柚、金桔、紅棗"
+elif currmonth == 9:
+    str1+="《盛產蔬菜》\n 葉菜類：山茼蒿、韭黃、\n 根莖類：山藥、蓮藕\n 花果類：青木瓜、玉米筍、青椒\n 《盛產水果》\n 木瓜、芭樂、香蕉、鳳梨、葡萄、木瓜、梨子、紅龍果、釋迦、文旦柚、柿子"
+elif currmonth == 10:
+    str1+="《盛產蔬菜》\n 葉菜類：青江菜、茭白筍\n 根莖類：\n 花果類：玉米、糯米椒、橄欖\n 《盛產水果》\n 芭樂、香蕉、葡萄、木瓜、梨子、紅龍果、文旦柚、白柚、柿子、柳橙、椪柑、洛神花"
+elif currmonth == 11:
+    str1+="《盛產蔬菜》\n 葉菜類：小白菜、芥蘭菜、山蘇\n 根莖類：白蘿蔔、大頭菜\n 花果類：\n《盛產水果》\n 芭樂、香蕉、葡萄、木瓜、梨子、紅龍果、釋迦、柿子、柳橙、椪柑"
+elif currmonth == 12:
+    str1+="《盛產蔬菜》\n 葉菜類：菠菜、芫荽、高麗菜、結球萵苣(生菜)\n 根莖類：櫻桃蘿蔔\n 花果類：紅豆\n 其他：香菇、杏鮑菇\n《盛產水果》\n 芭樂、香蕉、葡萄、木瓜、梨子、釋迦、柿子、柳橙、椪柑、蓮霧、棗、仙桃、無花果"
+else:
+    str1="月份判斷錯誤！"
+
+#圖文選單--食譜相關材料
+def fooditems(vegetable):
+  url="https://你想要的網站.tw/search/{0}/".format(vegetable)
+  r1=requests.get(url,headers={
+    "user-agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "cookie":'CF-IPCountry=TW; visitor=14087764475468241129; _pbjs_userid_consent_data=3524755945110770; _lr_retry_request=true; _lr_env_src_ats=false; _gcl_au=1.1.1186185615.1679392395; ad2session=19de63a0-0d3d-44bd-a313-7cac77c7bbc4; _tfpvi=ZjQzYWFjYjctZDU4ZS00YmU2LWJjOTUtNzhkNGViMGRlZDk3Iy00LTE=; panoramaId_expiry=1679997196131; _cc_id=643e115fa3d470b18e14158653a018; panoramaId=5715b6337840e268d89a46a0940716d53938d10bf8e2eb7aa6eb8125b099e2fb; TREK_SESSION=5e46ebd2-4b09-4ac6-30f8-79a5cac36044; ad2udid=64197e6665f690.963120441afb9cd0e15900bffc577a8b608aa139; _fbp=fb.1.1679392396221.1553833292; _clck=i03qw7|1|fa3|0; AMP_TOKEN=$NOT_FOUND; _gid=GA1.2.1807942782.1679392396; sent-cid=1679392396; _lr_sampling_rate=100; _pubcid=e53adfb8-fd01-407c-a976-6af3f1dbeef8; _au_1d=AU1D-0100-001679392405-S8K3AITA-1MTH; pbjs-unifiedid={"TDID":"dd0140eb-772c-4488-aabe-15670d2cd335","TDID_LOOKUP":"TRUE","TDID_CREATED_AT":"2023-02-21T09:53:25"}; CSRF-TOKEN=RLfG3nS8uNkt2WlNq/7j4/G+dFqiLaLc6S9/V248dm5CNvB0AL12Ut13vg2fLJ/SMcA4OKdIoCpnhRNstv5idQ==; _icook_sess=bnhwMkV3V25QMU5xbnVSMGVLL0MxN0UreWVndEsrRVYySGREZnQ3RUR5aUxjMlZJQzY5ZFlTckhTQWh4bVltT3NVeWlNSCt2elVSVkIvQVpiZkFCaTJ2akdtbjZIdTNDYTc4bW5LT3ltUGpwY0E0cVY1UEVmUWZnTUg0dzkzY3ZWUjFaMzROL0ZOT3FPdjlwT3FzMkxwdCtqdGFTWUhMYWROQi9jbk9zb3lXYlp1V21sRzhSOGtXazQwTDJiYWhBU1JrOVhKNlQ2dUkyMnVLOUN0NGtvMnpnaFJqVHFZejFiSFhmU2w0aWI2cVBpeTJuanhFTnRYdnprZjJYVVZxei0tbW1tMnNjd1Y5WVBzRllMTnV6U05PUT09--6d12e4c0278adacf7f457ce93976e37a661b01bc; _clsk=6wgyoj|1679392431184|2|1|q.clarity.ms/collect; _ga_Q65WJCEHK3=GS1.1.1679392395.1.1.1679392434.21.0.0; _au_last_seen_pixels=eyJhcG4iOjE2NzkzOTI0MDUsInR0ZCI6MTY3OTM5MjQwNSwicHViIjoxNjc5MzkyNDA1LCJydWIiOjE2NzkzOTI0MDUsInRhcGFkIjoxNjc5MzkyNDA1LCJhZHgiOjE2NzkzOTI0MDUsImdvbyI6MTY3OTM5MjQwNSwiYWRvIjoxNjc5MzkyNDA1LCJ0YWJvb2xhIjoxNjc5MzkyNDA1LCJtZWRpYW1hdGgiOjE2NzkzOTI0MDUsInNtYXJ0IjoxNjc5MzkyNDM4LCJpbXByIjoxNjc5MzkyNDM4LCJiZWVzIjoxNjc5MzkyNDM4LCJ1bnJ1bHkiOjE2NzkzOTI0MzgsInBwbnQiOjE2NzkzOTI0MzgsInNvbiI6MTY3OTM5MjQzOCwib3BlbngiOjE2NzkzOTI0Mzh9; _ga=GA1.2.483836519.1679392396; cto_bundle=-bLLsF8wSEwxZDNZUUowbUs4V1ptMHJUVTZ4UW9IQWt0VWJUS0pYbWEyeW0yN1pjYkVMaVUyTkRnOEwyZUJKQkpKSGFjeDU0Zks4WWNGZXhmdzlGZU9DOXNITmFmNnZnZnJGam15bjJwWEV2Vk5CaEY2Tm44OFVtTEgyUWcxMnVpaTZKRE1iNDFWTiUyRkVIMmN4UkFRbSUyQk82ZmtRJTNEJTNE; cto_bidid=pmDkCF95R0J4VXRkRU54eVNSMVRpVFJ4dE5SY0pMUk14d3hqdFpSME55RXRNY2lTSHpzNzgwam5DMyUyRlVQSXhJNmc5R1p4ODFteEhNRkh1STlVeVVKVWpDMDN5bmpkSjJQTTE1SDZEZ3ZIeDJpdk1FJTNE; _ga_ZKZX6M179R=GS1.1.1679392396.1.1.1679392447.9.0.0; _gat_gtag_UA_18942613_4=1',
+    "referer":"https://icook.tw/search/"
+  })
+
+  b1=BeautifulSoup(r1.text,"html.parser")
+  rowdata=b1.find_all(class_="browse-recipe-content")
+
+  list1=[]
+  for i in range(0,len(rowdata),1):
+    #print(rowdata[i])
+    title = rowdata[i].find(class_="browse-recipe-name")
+    items = rowdata[i].find(class_="browse-recipe-content-ingredient")
+    list1.append("《"+title.text.strip()+"》"+items.text.strip())
+    if i >= 40:
+      break
+  return("\n".join(list1))
+
+#圖文選單設定檔：設定圖面大小、按鍵名與功能
+# 設定 headers，輸入你的 Access Token，記得前方要加上「Bearer 」( 有一個空白 )
+headers = {'Authorization':'Bearer '+access_token,'Content-Type':'application/json'}  
+
+body={
+  "size": {"width": 2500,"height": 1686},
+  "selected": True,
+  "name": "richmenu1",
+  "chatBarText": "〔選單顯示切換〕",
+  "areas": [
+    {
+      "bounds":{"x":5,"y":0,"width":824,"height":850},
+      "action":{"type":"uri","label":"拍照作辨識","uri":"https://line.me/R/nv/camera/"}
+    },
+    {
+      "bounds":{"x":0,"y":850,"width":825,"height":818},
+      "action":{"type":"message","text":"%s"%str1} #當令盛產
+    },
+    {
+      "bounds":{"x":829,"y":5,"width":871,"height":849},
+      "action":{"type":"postback","data":"richmenuB"} #挑選秘訣
+    },
+    {
+      "bounds":{"x":825,"y":854,"width":875,"height":814},
+      "action":{"type":"postback","data":"richmenuE"} #食譜材料
+    },
+    {
+      "bounds":{"x":1700,"y":0,"width":800,"height":858},
+      "action":{"type":"postback","data":"richmenuC"} #操作說明
+    },
+    {
+      "bounds":{"x":1700,"y":858,"width":800,"height":810},
+      "action":{"type":"postback","data":"richmenuF"} #發現好物                
+    } 
+  ]
+}
+
+# 向指定網址發送 request
+req = requests.request('POST','https://api.line.me/v2/bot/richmenu',headers=headers,data=json.dumps(body).encode('utf-8'))
+richmenu_id=req.text[15:len(req.text)-2]
+
+line_bot_api = LineBotApi(access_token)
+
+with open('richmenu.jpg', 'rb') as f:
+    line_bot_api.set_rich_menu_image(richmenu_id, 'image/jpeg', f)
+
+headers = {'Authorization':'Bearer '+access_token}
+req2 = requests.request('POST', 'https://api.line.me/v2/bot/user/all/richmenu/'+richmenu_id, headers=headers)
+
+#用戶點擊button後，觸發postback event，對其回傳做相對應處理
+usertxt="小黃瓜" #default
+@handler.add(PostbackEvent)
+def handle_post_message(event):
+    if (event.postback.data.find('item1')== 0):
+        line_bot_api.reply_message(
+            event.reply_token,
+            ImageSendMessage(original_content_url='https://storage.googleapis.com/gcp-ai-2023-jessie-linebotai/pic/item1.jpg',preview_image_url='https://storage.googleapis.com/gcp-ai-2023-jessie-linebotai/pic/item1.jpg')
+            )
+    elif (event.postback.data.find('item2') == 0):
+        line_bot_api.reply_message(
+            event.reply_token,
+            ImageSendMessage(original_content_url='https://storage.googleapis.com/gcp-ai-2023-jessie-linebotai/pic/item2.jpg',preview_image_url='https://storage.googleapis.com/gcp-ai-2023-jessie-linebotai/pic/item2.jpg')
+            )
+    #圖文選單-發現好物                
+    elif (event.postback.data.find('richmenuF') == 0):
+        line_bot_api.reply_message(event.reply_token,buttons_template_message)
+    #圖文選單-食譜材料        
+    elif (event.postback.data.find('richmenuE') == 0):
+        line_bot_api.reply_message(event.reply_token,TextSendMessage(text=fooditems(usertxt)))
+    #圖文選單-操作說明        
+    elif (event.postback.data.find('richmenuC') == 0):
+        ss="【找食譜】輸入欲搜尋食譜的菜名，例如絲瓜，再點選圖文選單->食譜材料，可查詢烹煮絲瓜所需相關食材。\n"
+        ss+="【挑選蔬果】輸入欲挑選的蔬果名稱，例如絲瓜，再點選圖文選單->挑選秘訣，可查詢挑選絲瓜的注意事項。"
+        line_bot_api.reply_message(event.reply_token,TextSendMessage(text=ss))   
+    #圖文選單-挑選秘訣      
+    elif (event.postback.data.find('richmenuB') == 0):
+        ss=""
+        import csv
+        with open('pickup.csv') as csvfile:
+          spamreader = csv.reader(csvfile, delimiter=',')
+          for row in spamreader:
+            print(row[0])
+            if row[0]==usertxt:
+              ss='：'.join(row)
+              break
+        if ss=="":
+          ss="查無此蔬果挑選秘訣。"      
+        line_bot_api.reply_message(event.reply_token,TextSendMessage(text=ss))              
+    else:
+        pass
+
+# 用戶發出文字消息時， 按條件內容, 回傳文字消息
+@handler.add(MessageEvent, message=TextMessage)
+def handle_messageT(event):
+  global usertxt
+  usertxt=event.message.text
+  textmsg=["@玩看看","@1","@2","@3","@111","@reply","@more"]
+  if(event.message.text.find('@') != -1):
+    if (event.message.text in textmsg):
+      line_bot_api.reply_message(event.reply_token,template_message_dict.get(event.message.text))      
+    elif(event.message.text.find('@釋迦')!= -1):
+      line_bot_api.reply_message(
+      event.reply_token,
+      TextSendMessage(text="$好厲害~答對了！",emojis=[{"index":0,"productId":"5ac2213e040ab15980c9b447","emojiId":"005"}]))
+    else:
+      line_bot_api.reply_message(
+      event.reply_token,      
+      TextSendMessage(text="$好可惜~答錯了！",emojis=[{"index":0,"productId":"5ac1bfd5040ab15980c9b435","emojiId":"121"}]))
+      
+  else:
+    pass
+    # line_bot_api.reply_message(
+    # event.reply_token,
+    # TextSendMessage(text="字典內查無此字，請輸入@123或@分析的本質或@more")
+    #)
+
+#若收到圖片消息時，先回覆用戶文字消息，並從Line上將照片拿回。
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_messageI(event):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text='Image has Upload'+ ' ' + event.message.id))
+    message_content = line_bot_api.get_message_content(event.message.id)
+    with open(event.message.id+'.jpg', 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+@handler.add(MessageEvent, message=AudioMessage)
+def handle_messageA(event):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text='Audio has Upload'+ ' ' + event.message.id))
+    message_content = line_bot_api.get_message_content(event.message.id)
+    with open(event.message.id+'.mp3', 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+@handler.add(MessageEvent, message=VideoMessage)
+def handle_messageV(event):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text='Video has Upload'+ ' ' + event.message.id))
+    message_content = line_bot_api.get_message_content(event.message.id)
+    with open(event.message.id+'.mp4', 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+#載入辨識訓練的txt檔
+class_dict = {}
+with open('converted_savedmodel/labels.txt') as f:
+    for line in f:
+       (key, val) = line.split()
+       class_dict[int(key)] = val
+#print(class_dict)
+
+#圖片消息，解析圖片
+import tensorflow.keras
+from PIL import Image, ImageOps
+import numpy as np
+import time
+
+# Disable scientific notation for clarity
+np.set_printoptions(suppress=True)
+
+model=tensorflow.keras.models.load_model('converted_savedmodel/model.savedmodel')
+
+#收到用戶傳來的image
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_message(event):
+    print(time.asctime(time.localtime(time.time()) ))
+
+    message_content = line_bot_api.get_message_content(event.message.id)
+    file_name = event.message.id+'.jpg'
+    with open(file_name, 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+    print(time.asctime( time.localtime(time.time()) ))
+
+    data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+
+    # Replace this with the path to your image
+    image = Image.open(file_name)
+
+    #resize the image to a 224x224 with the same strategy as in TM2:
+    #resizing the image to be at least 224x224 and then cropping from the center
+    size = (224, 224)
+    image = ImageOps.fit(image, size, Image.ANTIALIAS)
+
+    #print(time.asctime( time.localtime(time.time()) ))
+    
+    #turn the image into a numpy array
+    image_array = np.asarray(image)
+
+    # display the resized image
+    #image.show()
+
+    # Normalize the image
+    normalized_image_array = (image_array.astype(np.float32) / 127.0 - 1 )
+
+    # Load the image into the array
+    data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+    data[0]= normalized_image_array[0:224,0:224,0:3]
+
+    # run the inference
+    prediction = model.predict(data)
+
+    #print(time.asctime( time.localtime(time.time()) ))
+
+    max_probability_item_index = np.argmax(prediction[0])
+
+    if prediction.max() > 0.6:
+        line_bot_api.reply_message(
+          event.reply_token,
+          TextSendMessage(
+          """這個物件極有可能是 %s ，其相似機率為 %s """ %(class_dict.get(max_probability_item_index), prediction[0][max_probability_item_index])
+          )
+        )
+    else :
+      line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(
+        """您的圖片無法辨識！！"""
+        )
+      )
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
