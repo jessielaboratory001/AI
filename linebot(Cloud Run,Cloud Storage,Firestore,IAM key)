@@ -1,0 +1,413 @@
+from flask import Flask, request, abort, jsonify #引用Web Server套件
+
+import json, urllib.request, os, requests
+
+from datetime import datetime
+from linebot import (LineBotApi, WebhookHandler)
+
+from linebot.exceptions import (InvalidSignatureError) # 引用無效簽章錯誤
+
+from linebot.models import (
+    MessageAction, URIAction, PostbackAction, DatetimePickerAction,
+    CameraAction, CameraRollAction, LocationAction, QuickReply, QuickReplyButton
+)
+
+from linebot.models import (
+    TextMessage, ImageMessage, AudioMessage, VideoMessage, RichMenu
+)
+
+from linebot.models import (
+    TextSendMessage, ImageSendMessage, TemplateSendMessage
+)
+
+from linebot.models.template import ButtonsTemplate
+
+from linebot.models.events import (
+    FollowEvent, MessageEvent, PostbackEvent,
+)
+
+import logging
+import google.cloud.logging
+from google.cloud.logging.handlers import CloudLoggingHandler
+from google.cloud import storage
+from google.cloud import firestore
+
+#========== 建立line event log，用來記錄line event ==========
+client = google.cloud.logging.Client()
+bot_event_handler = CloudLoggingHandler(client,name="line_bot_event")
+bot_event_logger=logging.getLogger('line_bot_event')
+bot_event_logger.setLevel(logging.INFO)
+bot_event_logger.addHandler(bot_event_handler)
+
+#========== 設定值 ==========
+access_token = "YOUR CHANNEL ACCESS TOKEN"
+handler = WebhookHandler("YOUR_CHANNEL_SECRET")
+bucket_name = "YOUR CLOUD STORAGE BUCKET"  #cloud storage 值區名稱
+
+app = Flask(__name__)
+# app = Flask(__name__,static_url_path="/material",static_folder="./material/")
+# from flask_ngrok import run_with_ngrok
+# run_with_ngrok(app)
+
+line_bot_api = LineBotApi(access_token)
+
+# 設定雲端資料
+storage_client = storage.Client()
+bucket = storage_client.bucket(bucket_name)
+
+#========== 啟動server對外接口，使Line能丟消息進來 ==========
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']     #get X-Line-Signature header value
+    body = request.get_data(as_text=True)  #get request body as text
+    #print(body)
+    bot_event_logger.info(body)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        print("Invalid signature. Please check your channel access token/channel secret.")
+        abort(400)
+
+    return 'OK'
+
+#========== 創建QuickReplyButton ==========
+# 點擊後，以用戶身份發送文字消息--MessageAction
+textQuickReplyButton = QuickReplyButton(action=MessageAction(label="發送文字消息", text="text2"))
+
+# 點擊後，彈跳出選擇時間之視窗--DatetimePickerAction
+dateQuickReplyButton = QuickReplyButton(
+    action=DatetimePickerAction(label="日期選擇", data="waterdate", mode="date"))
+currdate=datetime.now().date()
+
+# 點擊後，開啟相機--CameraAction
+cameraQuickReplyButton = QuickReplyButton(action=CameraAction(label="拍照"))
+
+# 點擊後，切換至照片相簿選擇
+cameraRollQRB = QuickReplyButton(action=CameraRollAction(label="選擇照片"))
+
+# 點擊後，跳出地理位置
+locationQRB = QuickReplyButton(action=LocationAction(label="地理位置"))
+
+# 點擊後，以Postback事件回應Server 
+postbackQRB01 = QuickReplyButton(action=PostbackAction(label="創建養成植物", data="qbtn01"))
+postbackQRB02 = QuickReplyButton(action=PostbackAction(label="修改資料", data="qbtn02"))
+
+postbackQRB11 = QuickReplyButton(action=PostbackAction(label="修改植物資料", data="qbtn11"))
+postbackQRB12 = QuickReplyButton(action=PostbackAction(label="查看照護紀錄", data="qbtn12"))
+postbackQRB13 = QuickReplyButton(action=PostbackAction(label="查看照顧須知", data="qbtn13"))
+
+postbackQRB21 = QuickReplyButton(action=PostbackAction(label="創建養成植物", data="qbtn21"))
+postbackQRB22 = QuickReplyButton(action=PostbackAction(label="修改資料", data="qbtn22"))
+postbackQRB23 = QuickReplyButton(action=PostbackAction(label="修改植物資料", data="qbtn23"))
+postbackQRB24 = QuickReplyButton(action=PostbackAction(label="查看照護紀錄", data="qbtn24"))
+postbackQRB25 = QuickReplyButton(action=PostbackAction(label="查看照顧須知", data="qbtn25"))
+
+# 以QuickReply封裝該些QuickReply Button
+quickReplyList1 = QuickReply(
+    items = [postbackQRB01,postbackQRB02]
+)
+
+quickReplyList2 = QuickReply(
+    items = [postbackQRB11,postbackQRB12,postbackQRB13]
+)
+
+quickReplyList3 = QuickReply(
+    items = [postbackQRB21,postbackQRB22,postbackQRB23,postbackQRB24,postbackQRB25]
+)
+
+#製作TextSendMessage，並將剛封裝的QuickReply放入
+quick_reply_text_send_message1 = TextSendMessage(text='目前點選', quick_reply=quickReplyList1)
+quick_reply_text_send_message2 = TextSendMessage(text='目前點選', quick_reply=quickReplyList2)
+
+#========== 告知handler，如果收到用戶關注FollowEvent(加好友、封鎖、解封鎖)，則做下面的方法處理 ==========
+@handler.add(FollowEvent)
+def reply_text_and_get_user_profile(event):
+ 
+  # 取個資
+  line_user_profile = line_bot_api.get_profile(event.source.user_id)
+
+  # 跟line 取回用戶大頭照片，並放置在本地端
+  file_name = line_user_profile.user_id + '.jpg'
+  urllib.request.urlretrieve(line_user_profile.picture_url, file_name)
+
+  global storage_client,bucket,bucket_name
+  # 依照用戶id當資料夾名稱，大頭照名稱為user_pic.png
+  destination_blob_name = f"{line_user_profile.user_id}/user_pic.png"
+  source_file_name = file_name
+
+  # 上傳至cloud storage
+  blob = bucket.blob(destination_blob_name)
+  blob.upload_from_filename(source_file_name)
+  os.remove(file_name)
+
+  # 設定用戶資料json
+  user_dict = {
+      "user_id": line_user_profile.user_id,
+      "picture_url": f"https://storage.googleapis.com/{bucket_name}/{destination_blob_name}",
+      "display_name": line_user_profile.display_name,
+      "status_message": line_user_profile.status_message
+  }
+  # 將用戶資料新增至firestore，table name為line-user，主鍵為user_id
+  db = firestore.Client()
+  doc_ref = db.collection(u'line-user').document(user_dict.get("user_id"))
+  doc_ref.set(user_dict)
+
+  #line_bot_api.reply_message(event.reply_token, TextSendMessage(text="個資已取"))
+  
+  # 回覆文字消息與圖片消息
+  line_bot_api.reply_message(
+      event.reply_token,
+      [TextSendMessage('$點選辨識，認識一下多肉植物吧~',emojis=[{"index":0,"productId":"5ac1bfd5040ab15980c9b435","emojiId":"105"}])] ) 
+      
+#========== 圖文選單設定檔：設定圖面大小、按鍵名與功能 ==========
+
+# 設定 headers，輸入你的 Access Token，記得前方要加上「Bearer 」( 有一個空白 )
+headers = {'Authorization':'Bearer '+access_token,'Content-Type':'application/json'}  
+
+# 讀取功能說明 introduce.txt
+blob = bucket.blob("introduce.txt")
+with blob.open("r") as f:
+    str1 = f.read()
+
+body={
+  "size": {"width": 800,"height": 270},
+  "selected": True,
+  "name": "richmenu1",
+  "chatBarText": "〔選單顯示切換〕",
+  "areas": [
+    { #辨識
+      "bounds":{"x":0,"y":0,"width":266,"height":270},
+      "action":{"type":"postback","data":"richmenuA"}
+    },
+    { #養成
+      "bounds":{"x":266,"y":0,"width":267,"height":270},
+      "action":{"type":"postback","data":"richmenuB"} 
+    },
+    { #功能說明
+      "bounds":{"x":533,"y":0,"width":267,"height":270},
+      "action":{"type":"message","text":"%s"%str1} 
+    }
+  ]
+}
+
+# 向指定網址發送 request
+req = requests.request('POST','https://api.line.me/v2/bot/richmenu',headers=headers,data=json.dumps(body).encode('utf-8'))
+richmenu_id=req.text[15:len(req.text)-2]
+
+blob = bucket.blob("richmenu.jpg")
+with blob.open("rb") as f:
+    line_bot_api.set_rich_menu_image(richmenu_id, 'image/jpeg', f.read())
+        
+
+headers = {'Authorization':'Bearer '+access_token}
+req2 = requests.request('POST', 'https://api.line.me/v2/bot/user/all/richmenu/'+richmenu_id, headers=headers)
+
+
+#========== 用戶點擊button後，觸發postback event，對其回傳做相對應處理 ==========
+usertxt=""
+@handler.add(PostbackEvent)
+def handle_post_message(event):
+    global bucket_name
+    from generate_signed_urls import generate_signed_url
+    lineuser_ID = event.source.user_id
+    #圖文選單-辨識
+    if (event.postback.data.find('richmenuA') == 0):
+      pass
+      
+    #圖文選單-養成       
+    elif (event.postback.data.find('richmenuB') == 0):        
+         line_bot_api.reply_message(event.reply_token,TextSendMessage("創建養成植物：從上傳的圖片中選擇要種植的植物。修改資料：修改已種植的植物資料。",quick_reply=quickReplyList1))   
+    #按鈕qbtn01-圖片輪播 
+    elif (event.postback.data.find('qbtn01') == 0):   
+        #抓取資料檔(user_plants.csv)用戶上傳的圖片
+        blob = bucket.blob(f"{lineuser_ID}/user_plants.csv")
+        
+        with blob.open('r') as f:
+            csv1 = f.read()
+        csv1lines = csv1.splitlines(keepends=False)
+
+        img_carousel = {
+            "type": "template",
+            "altText": "this is a image carousel template",
+            "template": {
+                "type": "image_carousel",
+                "columns": []
+            }
+        }
+        
+        j = 0 #輪播圖片最多10筆         
+        for i in range(0,len(csv1lines)):
+            csvdata = csv1lines[i].split(',')
+            if csvdata[5] != 'Y':   #已種植        
+                filepath = lineuser_ID+'/pic1/'+csvdata[4]              
+                #furl = f"https://storage.googleapis.com/download/storage/v1/b/{bucket_name}/o/{filepath}?alt=media"
+                furl = generate_signed_url("gcp-ai-2003-jessie-e924a78a5dcc.json",bucket_name,filepath)      
+                img_carousel['template']['columns'].append({
+                        "imageUrl": furl,
+                        "action": {
+                        "type": "postback",
+                        "label": "栽種請點選",
+                        "data": f"imgcar1,{csvdata[0]}"
+                        }
+                    }
+                )
+                j += 1
+
+            if j >= 10: 
+                break
+
+        line_bot_api.reply_message(event.reply_token,TemplateSendMessage.new_from_json_dict(img_carousel))
+        # line_bot_api.reply_message(event.reply_token,TemplateSendMessage(img_carousel)) 
+    #輪播連結imgcar1
+    elif (event.postback.data.find('imgcar1') == 0):
+        #種植否=Y存檔
+        blob = bucket.blob("{lineuser_ID}/user_plants.csv")
+        with blob.open('r') as f:
+            csv1 = f.read()       
+        csv1lines = csv1.splitlines(keepends=False)     
+        csv1 = []          
+        for i in range(0,len(csv1lines)):
+            csvdata = csv1lines[i].split(',')
+            if csvdata[0] == '':      
+                csvdata[5] = 'Y'     
+            csv1.append(csvdata)
+
+        with blob.open('w',newline="") as f:
+            f.write(csv1)                           
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage("{csvdata[2]}設定為已種植"))                                
+    else:
+        pass
+
+#========== 用戶發出文字消息時， 按條件內容, 回傳文字消息 ==========
+@handler.add(MessageEvent, message=TextMessage)
+def handle_messageT(event):
+  global usertxt
+  usertxt=event.message.text
+  
+  #@暱稱
+  if(event.message.text.find('@') != -1):
+    pass     
+  
+
+#========== 若收到圖片消息時，先回覆用戶文字消息，並從Line上將照片拿回。==========
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_messageI(event):
+    
+    lineuser_ID = event.source.user_id
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text='Image has Upload'+ ' ' + event.message.id))
+    message_content = line_bot_api.get_message_content(event.message.id)
+
+    blob = bucket.blob(f'{lineuser_ID}/pic1/{event.message.id}.jpg')
+    with blob.open('wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+            
+#========== 若收到Audio音檔消息時，先回覆用戶文字消息，並從Line上將音檔拿回。==========
+@handler.add(MessageEvent, message=AudioMessage)
+def handle_messageA(event):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text='Audio has Upload'+ ' ' + event.message.id))
+    message_content = line_bot_api.get_message_content(event.message.id)
+    with open(event.message.id+'.mp3', 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+#========== 若收到Video影片檔消息時，先回覆用戶文字消息，並從Line上將影像檔拿回。==========
+@handler.add(MessageEvent, message=VideoMessage)
+def handle_messageV(event):
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text='Video has Upload'+ ' ' + event.message.id))
+    message_content = line_bot_api.get_message_content(event.message.id)
+    with open(event.message.id+'.mp4', 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+#========== 辨識 ===============================================================
+#載入辨識訓練的txt檔
+class_dict = {}
+with open('converted_savedmodel/labels.txt', encoding='utf-8') as f:
+    for line in f:
+       (key, val) = line.split()
+       class_dict[int(key)] = val
+#print(class_dict)
+
+#圖片消息，解析圖片
+import tensorflow.keras
+from PIL import Image, ImageOps
+import numpy as np
+import time
+
+np.set_printoptions(suppress=True)
+
+model=tensorflow.keras.models.load_model('converted_savedmodel/model.savedmodel')
+
+收到用戶傳來的image
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_message(event):
+    print(time.asctime(time.localtime(time.time()) ))
+
+    message_content = line_bot_api.get_message_content(event.message.id)
+    file_name = event.message.id+'.jpg'
+    with open(file_name, 'wb') as fd:
+        for chunk in message_content.iter_content():
+            fd.write(chunk)
+
+    print(time.asctime( time.localtime(time.time()) ))
+
+    data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+
+    # Replace this with the path to your image
+    image = Image.open(file_name)
+
+    #resize the image to a 224x224 with the same strategy as in TM2:
+    #resizing the image to be at least 224x224 and then cropping from the center
+    size = (224, 224)
+    image = ImageOps.fit(image, size, Image.ANTIALIAS)
+
+    #print(time.asctime( time.localtime(time.time()) ))
+    
+    #turn the image into a numpy array
+    image_array = np.asarray(image)
+
+    # display the resized image
+    #image.show()
+
+    # Normalize the image
+    normalized_image_array = (image_array.astype(np.float32) / 127.0 - 1 )
+
+    # Load the image into the array
+    data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
+    data[0]= normalized_image_array[0:224,0:224,0:3]
+
+    # run the inference
+    prediction = model.predict(data)
+
+    #print(time.asctime( time.localtime(time.time()) ))
+
+    max_probability_item_index = np.argmax(prediction[0])
+
+    if prediction.max() > 0.6:
+        line_bot_api.reply_message(
+          event.reply_token,
+          TextSendMessage(
+          """這個物件極有可能是 %s ，其相似機率為 %s """ %(class_dict.get(max_probability_item_index), prediction[0][max_probability_item_index])
+          )
+        )
+    else :
+      line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(
+        """您的圖片無法辨識！！"""
+        )
+      )
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+#app.run()
