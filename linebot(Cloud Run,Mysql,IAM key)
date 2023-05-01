@@ -73,7 +73,7 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(access_token)
 
 # 設定雲端資料
-storage_client = storage.Client()
+storage_client = storage.Client.from_service_account_json(cs_sign)
 bucket = storage_client.bucket(bucket_name)
 
 #========== 啟動server對外接口，使Line能丟消息進來 ==========
